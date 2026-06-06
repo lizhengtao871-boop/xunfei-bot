@@ -1,4 +1,5 @@
 import os
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -11,7 +12,23 @@ from src.admin.upload import router as upload_router
 from src.router.intent import process_message
 from src.config import config
 
-app = FastAPI(title="讯飞协会管理智能体", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    os.makedirs(config.DOCS_DIR, exist_ok=True)
+    os.makedirs(config.CHROMA_PERSIST_DIR, exist_ok=True)
+    Base.metadata.create_all(bind=engine)
+    try:
+        from src.db.init_db import init_db
+        init_db()
+    except Exception as e:
+        print(f"[startup] init_db skipped: {e}")
+    yield
+    # Shutdown
+
+
+app = FastAPI(title="讯飞协会管理智能体", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -23,26 +40,6 @@ app.add_middleware(
 app.include_router(wx_router)
 app.include_router(admin_router)
 app.include_router(upload_router)
-
-
-@app.on_event("startup")
-def startup():
-    # Ensure data directories exist (important for Render ephemeral filesystem)
-    os.makedirs(config.DOCS_DIR, exist_ok=True)
-    os.makedirs(config.CHROMA_PERSIST_DIR, exist_ok=True)
-
-    # Create database tables
-    Base.metadata.create_all(bind=engine)
-
-    # Initialize seed data
-    from src.db.init_db import init_db
-    init_db()
-
-    # Build knowledge base if documents exist
-    from src.rag.retriever import _INDEX_PATH
-    if not _INDEX_PATH.exists():
-        from src.rag.retriever import build_knowledge_base
-        build_knowledge_base()
 
 
 class ChatRequest(BaseModel):
