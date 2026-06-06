@@ -1,0 +1,17 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+data/association.db
+data/chroma/
+*.egg-info/
+dist/
+build/
+ngrok*
+bore*
+*.zip
+*.log
+tunnel.py
+server.log
+server2.log
