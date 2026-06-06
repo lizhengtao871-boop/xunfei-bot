@@ -30,9 +30,6 @@ async def verify_url(
 
 @router.post("/callback")
 async def receive_message(request: Request):
-    timestamp = str(int(time.time()))
-    nonce = _random_str()
-
     body = await request.body()
     root = ET.fromstring(body)
     encrypted = root.find("Encrypt")
@@ -43,16 +40,41 @@ async def receive_message(request: Request):
     msg_root = ET.fromstring(plain)
     msg_type = msg_root.find("MsgType")
     content_el = msg_root.find("Content")
-    from_el = msg_root.find("From")
-    name_el = msg_root.find("Name")
+    from_user = msg_root.find("FromUserName")
+    to_user = msg_root.find("ToUserName")
+    agent_type = msg_root.find("AgentType")
 
+    reply_text = ""
     if msg_type is not None and msg_type.text == "text" and content_el is not None:
         text = content_el.text or ""
-        user_name = (name_el.text if name_el is not None else "") or (from_el.text if from_el is not None else "未知")
-        reply = process_message(text, user_name)
+        user_id = from_user.text if from_user is not None else ""
+        user_name = user_id or "未知"
+        reply_text = process_message(text, user_name)
 
-        if reply:
+        # Also try active send (may fail due to IP restriction, that's OK)
+        try:
             from src.wx_gateway.sender import send_markdown
-            send_markdown(reply)
+            send_markdown(reply_text, touser=user_id)
+        except Exception:
+            pass
+
+    # Passive reply (encrypted in response XML) — bypasses IP whitelist
+    if reply_text and from_user is not None:
+        ts = str(int(time.time()))
+        nc = _random_str()
+        reply_xml = (
+            f"<xml>"
+            f"<ToUserName><![CDATA[{from_user.text}]]></ToUserName>"
+            f"<FromUserName><![CDATA[{to_user.text if to_user is not None else ''}]]></FromUserName>"
+            f"<CreateTime>{ts}</CreateTime>"
+            f"<MsgType><![CDATA[text]]></MsgType>"
+            f"<Content><![CDATA[{reply_text}]]></Content>"
+            f"</xml>"
+        )
+        encrypted_xml, signature = wx_crypt.sign_encrypt(reply_xml, ts, nc)
+        return Response(
+            content=f"<xml><Encrypt><![CDATA[{encrypted_xml}]]></Encrypt><MsgSignature><![CDATA[{signature}]]></MsgSignature><TimeStamp>{ts}</TimeStamp><Nonce><![CDATA[{nc}]]></Nonce></xml>",
+            media_type="application/xml",
+        )
 
     return PlainTextResponse("")
