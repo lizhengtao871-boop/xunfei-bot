@@ -76,3 +76,9 @@ def root():
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "讯飞协会管理智能体"}
+
+
+@app.get("/ping")
+def ping():
+    from datetime import datetime
+    return {"pong": True, "time": datetime.now().isoformat()}
