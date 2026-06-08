@@ -1,5 +1,7 @@
 import os
 import sys
+import queue
+import threading
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,6 +9,9 @@ from pydantic import BaseModel
 
 from src.config import config
 from src.db.models import engine, Base
+
+# Message queue for async callback processing
+msg_queue: queue.Queue = queue.Queue()
 
 # Isolate potentially failing imports
 try:
@@ -32,8 +37,42 @@ except Exception as e:
     process_message = None
 
 
+def _worker():
+    """Background worker: process messages from queue and send replies."""
+    print("[worker] started", file=sys.stderr)
+    while True:
+        try:
+            text, user_id, user_name = msg_queue.get()
+            if text is None:  # shutdown signal
+                break
+
+            reply = process_message(text, user_name)
+            if reply:
+                reply_bytes = reply.encode("utf-8")
+                if len(reply_bytes) <= 4000:
+                    from src.wx_gateway.sender import send_markdown
+                    ok = send_markdown(reply, touser=user_id)
+                    if ok:
+                        msg_queue.task_done()
+                        continue
+                if len(reply_bytes) > 1900:
+                    reply = reply_bytes[:1900].decode("utf-8", errors="replace") + "..."
+                from src.wx_gateway.sender import send_text
+                send_text(reply, touser=user_id)
+
+            msg_queue.task_done()
+        except Exception as e:
+            print(f"[worker] error: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc(file=sys.stderr)
+
+
+_worker_thread = None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _worker_thread
     print("[startup] initializing...", file=sys.stderr)
     os.makedirs(config.DOCS_DIR, exist_ok=True)
     os.makedirs(config.CHROMA_PERSIST_DIR, exist_ok=True)
@@ -43,8 +82,18 @@ async def lifespan(app: FastAPI):
         init_db()
     except Exception as e:
         print(f"[startup] init_db error: {e}", file=sys.stderr)
-    print("[startup] complete", file=sys.stderr)
+
+    # Start background worker thread
+    _worker_thread = threading.Thread(target=_worker, daemon=True)
+    _worker_thread.start()
+    print("[startup] worker thread started", file=sys.stderr)
+
     yield
+
+    # Shutdown
+    msg_queue.put((None, None, None))
+    _worker_thread.join(timeout=10)
+    print("[shutdown] worker stopped", file=sys.stderr)
 
 
 app = FastAPI(title="讯飞协会管理智能体", version="0.1.0", lifespan=lifespan)
