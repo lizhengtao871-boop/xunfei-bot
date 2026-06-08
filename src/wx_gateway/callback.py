@@ -1,7 +1,8 @@
 import time
 import random
 import string
-from fastapi import APIRouter, Query, Request
+import threading
+from fastapi import APIRouter, Query, Request, BackgroundTasks
 from fastapi.responses import PlainTextResponse, Response
 import xml.etree.ElementTree as ET
 from src.wx_gateway.crypto import WXBizMsgCrypt
@@ -28,8 +29,19 @@ async def verify_url(
     return PlainTextResponse("signature failed", status_code=403)
 
 
+def _process_and_reply(text: str, user_id: str, user_name: str):
+    """Process message in background and send reply via active API."""
+    try:
+        reply = process_message(text, user_name)
+        if reply:
+            from src.wx_gateway.sender import send_markdown
+            send_markdown(reply, touser=user_id)
+    except Exception as e:
+        print(f"[callback] process error: {e}")
+
+
 @router.post("/callback")
-async def receive_message(request: Request):
+async def receive_message(request: Request, background_tasks: BackgroundTasks):
     body = await request.body()
     root = ET.fromstring(body)
     encrypted = root.find("Encrypt")
@@ -41,40 +53,14 @@ async def receive_message(request: Request):
     msg_type = msg_root.find("MsgType")
     content_el = msg_root.find("Content")
     from_user = msg_root.find("FromUserName")
-    to_user = msg_root.find("ToUserName")
-    agent_type = msg_root.find("AgentType")
 
-    reply_text = ""
     if msg_type is not None and msg_type.text == "text" and content_el is not None:
         text = content_el.text or ""
         user_id = from_user.text if from_user is not None else ""
         user_name = user_id or "未知"
-        reply_text = process_message(text, user_name)
 
-        # Also try active send (may fail due to IP restriction, that's OK)
-        try:
-            from src.wx_gateway.sender import send_markdown
-            send_markdown(reply_text, touser=user_id)
-        except Exception:
-            pass
+        # Process in background so callback returns within 5s timeout
+        background_tasks.add_task(_process_and_reply, text, user_id, user_name)
 
-    # Passive reply (encrypted in response XML) — bypasses IP whitelist
-    if reply_text and from_user is not None:
-        ts = str(int(time.time()))
-        nc = _random_str()
-        reply_xml = (
-            f"<xml>"
-            f"<ToUserName><![CDATA[{from_user.text}]]></ToUserName>"
-            f"<FromUserName><![CDATA[{to_user.text if to_user is not None else ''}]]></FromUserName>"
-            f"<CreateTime>{ts}</CreateTime>"
-            f"<MsgType><![CDATA[text]]></MsgType>"
-            f"<Content><![CDATA[{reply_text}]]></Content>"
-            f"</xml>"
-        )
-        encrypted_xml, signature = wx_crypt.sign_encrypt(reply_xml, ts, nc)
-        return Response(
-            content=f"<xml><Encrypt><![CDATA[{encrypted_xml}]]></Encrypt><MsgSignature><![CDATA[{signature}]]></MsgSignature><TimeStamp>{ts}</TimeStamp><Nonce><![CDATA[{nc}]]></Nonce></xml>",
-            media_type="application/xml",
-        )
-
+    # Always return empty immediately
     return PlainTextResponse("")
