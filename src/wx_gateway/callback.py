@@ -17,17 +17,19 @@ def _random_str(n: int = 10) -> str:
 
 
 def _send_reply(reply: str, user_id: str):
-    """Send reply via WeChat Work API. Truncate if needed."""
-    reply_bytes = reply.encode("utf-8")
-    if len(reply_bytes) > 4000:
-        reply = reply_bytes[:4000].decode("utf-8", errors="replace") + "\n\n...（内容过长已截断）"
+    """Send reply via WeChat Work API — use text to avoid markdown compatibility issues."""
+    import re
+    # Strip markdown formatting that WeChat Work can't handle
+    reply = re.sub(r'[*_~`>#]', '', reply)
+    reply = re.sub(r'http\S+', '[链接]', reply)
 
-    from src.wx_gateway.sender import send_markdown
-    ok = send_markdown(reply, touser=user_id)
-    if not ok:
-        from src.wx_gateway.sender import send_text
-        text_reply = reply_bytes[:1900].decode("utf-8", errors="replace")
-        send_text(text_reply, touser=user_id)
+    reply_bytes = reply.encode("utf-8")
+    # WeChat Work text limit: 2048 bytes
+    if len(reply_bytes) > 1900:
+        reply = reply_bytes[:1900].decode("utf-8", errors="replace") + "\n\n...（内容过长已截断）"
+
+    from src.wx_gateway.sender import send_text
+    send_text(reply, touser=user_id)
 
 
 @router.get("/callback")
